@@ -1,0 +1,133 @@
+From 3e5b38df976acc8220967194404df562caa0130f Mon Sep 17 00:00:00 2001
+From: cunninghamcard-bit
+ <269104167+cunninghamcard-bit@users.noreply.github.com>
+Date: Fri, 9 Oct 2026 14:26:36 +0800
+Subject: [PATCH] fix(input): a click on a passive layer surface must not
+ change focus
+
+Clicking a layer surface with keyboard_interactivity=None (an on-screen
+keyboard, a panel, a bar) was treated like clicking somewhere else:
+
+- The output under the click was focused, which on multi-monitor setups
+  takes the keyboard focus away from the focused window on another
+  output (#3971, #3984).
+- The on-demand layer-shell focus was cleared, which takes the keyboard
+  focus away from an on-demand layer surface like a launcher that hides
+  on focus loss. Typing on an on-screen keyboard into such a launcher
+  closed it, and the input method was deactivated on the focus change
+  too.
+
+A passive layer surface never receives keyboard focus, so a click on it
+must not change the keyboard focus either: the click is how the user
+sends input to whatever is focused, through the passive surface. KWin,
+Sway and Hyprland behave the same way.
+
+Focused (on-demand) and exclusive layer surfaces keep receiving focus on
+click as before, including the output focus change needed to focus a
+layer surface on another output.
+---
+ src/input/mod.rs | 34 +++++++++++++++++++++++++---------
+ src/niri.rs      | 18 ++++++++++++++++++
+ 2 files changed, 43 insertions(+), 9 deletions(-)
+
+diff --git a/src/input/mod.rs b/src/input/mod.rs
+index f1ad493..773c055 100644
+--- a/src/input/mod.rs
++++ b/src/input/mod.rs
+@@ -3000,10 +3000,16 @@ impl State {
+                 // FIXME: granular.
+                 self.niri.queue_redraw_all();
+             } else if let Some(output) = self.niri.output_under_cursor() {
+-                self.niri.layout.focus_output(&output);
++                // A passive layer surface (e.g. an on-screen keyboard) was clicked.
++                // Focusing its output would take the keyboard focus away from the focused
++                // window, possibly on another output.
++                let passive_layer = self.niri.pointer_contents.layer.as_ref();
++                if !self.niri.is_passive_layer_surface(passive_layer) {
++                    self.niri.layout.focus_output(&output);
+ 
+-                // FIXME: granular.
+-                self.niri.queue_redraw_all();
++                    // FIXME: granular.
++                    self.niri.queue_redraw_all();
++                }
+             }
+         };
+ 
+@@ -3653,10 +3659,15 @@ impl State {
+                         // FIXME: granular.
+                         self.niri.queue_redraw_all();
+                     } else if let Some(output) = under.output {
+-                        self.niri.layout.focus_output(&output);
++                        // A passive layer surface (e.g. an on-screen keyboard) was clicked.
++                        // Focusing its output would take the keyboard focus away from the
++                        // focused window, possibly on another output.
++                        if !self.niri.is_passive_layer_surface(under.layer.as_ref()) {
++                            self.niri.layout.focus_output(&output);
+ 
+-                        // FIXME: granular.
+-                        self.niri.queue_redraw_all();
++                            // FIXME: granular.
++                            self.niri.queue_redraw_all();
++                        }
+                     }
+                     self.niri.focus_layer_surface_if_on_demand(under.layer);
+                 }
+@@ -4165,10 +4176,15 @@ impl State {
+                 // FIXME: granular.
+                 self.niri.queue_redraw_all();
+             } else if let Some(output) = under.output {
+-                self.niri.layout.focus_output(&output);
++                // A passive layer surface (e.g. an on-screen keyboard) was clicked.
++                // Focusing its output would take the keyboard focus away from the focused
++                // window, possibly on another output.
++                if !self.niri.is_passive_layer_surface(under.layer.as_ref()) {
++                    self.niri.layout.focus_output(&output);
+ 
+-                // FIXME: granular.
+-                self.niri.queue_redraw_all();
++                    // FIXME: granular.
++                    self.niri.queue_redraw_all();
++                }
+             }
+             self.niri.focus_layer_surface_if_on_demand(under.layer);
+         };
+diff --git a/src/niri.rs b/src/niri.rs
+index ec40e01..c5678cd 100644
+--- a/src/niri.rs
++++ b/src/niri.rs
+@@ -6093,6 +6093,16 @@ impl Niri {
+         });
+     }
+ 
++    /// Returns true if the surface is a layer surface with `keyboard_interactivity=None`,
++    /// i.e. a passive layer surface like an on-screen keyboard or a panel. Clicking such a
++    /// surface sends input to whatever is focused (e.g. typing on an on-screen keyboard), so
++    /// the click must not change any focus state.
++    pub fn is_passive_layer_surface(&self, surface: Option<&LayerSurface>) -> bool {
++        surface.is_some_and(|surface| {
++            surface.cached_state().keyboard_interactivity == wlr_layer::KeyboardInteractivity::None
++        })
++    }
++
+     pub fn focus_layer_surface_if_on_demand(&mut self, surface: Option<LayerSurface>) {
+         if let Some(surface) = surface {
+             if surface.cached_state().keyboard_interactivity
+@@ -6107,6 +6117,14 @@ impl Niri {
+ 
+                 return;
+             }
++
++            // A passive layer surface (e.g. an on-screen keyboard) was clicked. It takes no
++            // keyboard focus, so it must not disturb the current keyboard focus either: the
++            // user may be typing into the focused on-demand layer surface (e.g. a launcher
++            // that hides on focus loss) through it.
++            if self.is_passive_layer_surface(Some(&surface)) {
++                return;
++            }
+         }
+ 
+         // Something else got clicked, clear on-demand layer-shell focus.
+-- 
+2.50.1 (Apple Git-155)
+
